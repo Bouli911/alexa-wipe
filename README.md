@@ -63,16 +63,6 @@ Only one value to edit in the HTML: **`$domain`**.
 
 ---
 
-## Deploying on GitHub Pages
-
-- Put both files in the repo. Rename `alexa-wipe.html` → **`index.html`** so the root URL loads it directly.
-- Set `$domain` to your Pages path, e.g. `youruser.github.io/alexa-wipe`.
-- **Note:** `CF-IPCountry` is **not** available on GitHub Pages → country detection automatically falls back to the external API (same behaviour as local mode).
-
-Example live setup: `https://youruser.github.io/alexa-wipe/`
-
----
-
 ## Warning
 
 - Removing devices is **permanent** and cannot be undone.
