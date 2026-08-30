@@ -1,5 +1,7 @@
 # Alexa Wipe
 
+**Try it live / Essayer en ligne:** [https://bouli911.github.io/alexa-wipe/](https://bouli911.github.io/alexa-wipe/)
+
 **[English](#english) · [Français](#français)**
 
 ---
