@@ -68,9 +68,9 @@
       sortNameAZ: 'Nom A → Z',
       sortNameZA: 'Nom Z → A',
       sortSkillAZ: 'Skill A → Z',
-      filterSkill: 'Skill :',
-      allSkills: 'Toutes les skills',
-      unknownSkill: 'Skill inconnue',
+      filterSkill: 'Source / Skill :',
+      allSkills: 'Toutes les sources / skills',
+      unknownSkill: 'Source inconnue',
       shown: '{n} affiché(s) sur {total}'
     },
     en: {
@@ -114,9 +114,9 @@
       sortNameAZ: 'Name A → Z',
       sortNameZA: 'Name Z → A',
       sortSkillAZ: 'Skill A → Z',
-      filterSkill: 'Skill:',
-      allSkills: 'All skills',
-      unknownSkill: 'Unknown skill',
+      filterSkill: 'Source / Skill:',
+      allSkills: 'All sources / skills',
+      unknownSkill: 'Unknown source',
       shown: '{n} shown of {total}'
     }
   };
@@ -307,18 +307,28 @@
   var selected = {};     /* id -> true */
   var checks = [];
 
-  function decodeSkillIdFromApplianceId(id) {
-    if (!id || id.indexOf('SKILL_') !== 0) return '';
+  function decodeSkillInfoFromApplianceId(id) {
+    var out = { skillId: '', stage: '' };
+    if (!id || id.indexOf('SKILL_') !== 0) return out;
     var rest = id.slice(6);
-    var cut = rest.indexOf('_');
-    if (cut < 0) return '';
+    var cut = rest.lastIndexOf('_');
+    if (cut < 0) return out;
     var b64 = rest.slice(0, cut);
     try {
       b64 = b64.replace(/-/g, '+').replace(/_/g, '/');
       while (b64.length % 4) b64 += '=';
       var decoded = atob(b64);
-      return decoded && decoded.indexOf('amzn1.ask.skill.') === 0 ? decoded : '';
-    } catch (e) { return ''; }
+      try {
+        var j = JSON.parse(decoded);
+        if (j && typeof j === 'object') {
+          if (typeof j.skillId === 'string') out.skillId = j.skillId;
+          if (typeof j.stage === 'string') out.stage = j.stage;
+          return out;
+        }
+      } catch (e1) {}
+      if (decoded.indexOf('amzn1.ask.skill.') === 0) out.skillId = decoded;
+    } catch (e2) {}
+    return out;
   }
 
   function firstUsefulString(obj, keys) {
@@ -338,35 +348,51 @@
   function buildPhoenixMeta(root) {
     var byId = {};
     var seen = [];
-    function walk(v, inherited) {
+
+    function merge(id, info) {
+      if (!id) return;
+      var cur = byId[id] || {};
+      Object.keys(info).forEach(function (k) {
+        var v = info[k];
+        if (v != null && v !== '' && (!Array.isArray(v) || v.length)) cur[k] = v;
+      });
+      byId[id] = cur;
+    }
+
+    function walk(v, hintedId) {
       if (!v || typeof v !== 'object') return;
       if (seen.indexOf(v) >= 0) return;
       seen.push(v);
 
-      var id = firstUsefulString(v, ['applianceId', 'legacyApplianceId']);
+      var id = firstUsefulString(v, ['applianceId', 'legacyApplianceId']) || hintedId || '';
+      var driver = v.driverIdentity || v.applianceDriverIdentity || {};
+      var namespace = firstUsefulString(driver, ['namespace']);
+      var identifier = firstUsefulString(driver, ['identifier']);
       var skillId = firstUsefulString(v, ['skillId', 'skillID', 'skillIdentifier']);
-      var skillName = firstUsefulString(v, [
-        'skillName', 'skillDisplayName', 'providerName', 'providerDisplayName',
-        'connectedVia', 'connectionName', 'manufacturerName', 'manufacturer'
-      ]);
+      if (!skillId && namespace === 'SKILL' && identifier.indexOf('amzn1.ask.skill.') === 0) skillId = identifier;
 
-      var next = {
-        skillId: skillId || (inherited && inherited.skillId) || '',
-        skillName: skillName || (inherited && inherited.skillName) || ''
+      var info = {
+        skillId: skillId,
+        skillName: firstUsefulString(v, ['skillName', 'skillDisplayName', 'providerName', 'providerDisplayName']),
+        manufacturerName: firstUsefulString(v, ['manufacturerName', 'manufacturer']),
+        friendlyDescription: firstUsefulString(v, ['friendlyDescription', 'description']),
+        modelName: firstUsefulString(v, ['modelName']),
+        connectedVia: firstUsefulString(v, ['connectedVia', 'connectionName']),
+        namespace: namespace,
+        identifier: identifier,
+        applianceTypes: Array.isArray(v.applianceTypes) ? v.applianceTypes.slice() : []
       };
-
-      if (id) {
-        byId[id] = byId[id] || {};
-        if (next.skillId) byId[id].skillId = next.skillId;
-        if (next.skillName) byId[id].skillName = next.skillName;
-      }
+      if (id) merge(id, info);
 
       Object.keys(v).forEach(function (k) {
         var child = v[k];
-        if (child && typeof child === 'object') walk(child, next);
+        if (!child || typeof child !== 'object') return;
+        var childHint = '';
+        if (typeof k === 'string' && (k.indexOf('AAA_') === 0 || k.indexOf('SKILL_') === 0 || k.indexOf('AlexaBridge_') === 0)) childHint = k;
+        walk(child, childHint);
       });
     }
-    walk(root, null);
+    walk(root, '');
     return byId;
   }
 
@@ -381,8 +407,78 @@
     }
   }
 
+  function sonarBaseId(id) {
+    if (!id || id.indexOf('AAA_SonarCloudService_') !== 0) return '';
+    return id.split('#')[0];
+  }
+
+  function shortSonarId(id) {
+    var b = sonarBaseId(id);
+    if (!b) return '';
+    var prefix = 'AAA_SonarCloudService_';
+    return b.slice(prefix.length, prefix.length + 8);
+  }
+
+  function metaForId(id, map) {
+    if (!id) return {};
+    if (map[id]) return map[id];
+    var base = sonarBaseId(id);
+    if (base && map[base]) return map[base];
+    return {};
+  }
+
+  function usefulManufacturer(x) {
+    if (!x) return '';
+    var s = String(x).trim();
+    if (!s || /^(unknown|generic|none)$/i.test(s)) return '';
+    return s;
+  }
+
+  function sourceForDevice(id, meta) {
+    meta = meta || {};
+
+    if (id && id.indexOf('AlexaBridge_') === 0) {
+      return { key: '__ALEXA__', label: 'Alexa / Echo', detail: 'AlexaBridge' };
+    }
+
+    var decoded = decodeSkillInfoFromApplianceId(id);
+    var skillId = meta.skillId || decoded.skillId || '';
+    var ns = meta.namespace || '';
+    var ident = meta.identifier || '';
+    if (!skillId && ns === 'SKILL' && ident.indexOf('amzn1.ask.skill.') === 0) skillId = ident;
+
+    if (skillId || ns === 'SKILL' || (id && id.indexOf('SKILL_') === 0)) {
+      var skillName = meta.skillName || usefulManufacturer(meta.manufacturerName) || '';
+      var label = skillName || skillId || (ident ? 'Skill ' + ident : 'Skill Alexa');
+      var detail = skillId || ident || 'SKILL';
+      if (decoded.stage) detail += ' · ' + decoded.stage;
+      return { key: 'SKILL:' + (skillId || ident || label), label: label, detail: detail, skillId: skillId };
+    }
+
+    var sonar = sonarBaseId(id);
+    if (sonar || (ns === 'AAA' && ident === 'SonarCloudService')) {
+      var manufacturer = usefulManufacturer(meta.manufacturerName);
+      var via = meta.connectedVia || '';
+      var shortId = shortSonarId(id);
+      var label2 = manufacturer || 'SonarCloudService';
+      if (via && via !== 'Wi-Fi' && via !== label2) label2 += ' · via ' + via;
+      if (shortId) label2 += ' · ' + shortId;
+      var detail2 = 'AAA / SonarCloudService';
+      if (meta.friendlyDescription) detail2 += ' · ' + meta.friendlyDescription;
+      else if (via) detail2 += ' · via ' + via;
+      return { key: 'SONAR:' + (sonar || (manufacturer + '|' + via)), label: label2, detail: detail2 };
+    }
+
+    var manufacturer2 = usefulManufacturer(meta.manufacturerName);
+    if (manufacturer2) {
+      return { key: 'MFG:' + manufacturer2, label: manufacturer2, detail: meta.friendlyDescription || meta.connectedVia || '' };
+    }
+
+    return { key: '__UNKNOWN__', label: t('unknownSkill'), detail: ns || ident || '' };
+  }
+
   function skillLabel(d) {
-    return d.skill || d.skillId || t('unknownSkill');
+    return d.sourceLabel || d.skill || d.skillId || t('unknownSkill');
   }
 
   function visibleDevices() {
@@ -447,7 +543,8 @@
 
       var nameBox = E('span', 'display:flex;flex-direction:column;min-width:180px;');
       nameBox.appendChild(E('span', 'color:#fff;', d.name));
-      nameBox.appendChild(E('span', 'color:#8ab4f8;font-size:12px;', 'Skill: ' + skillLabel(d)));
+      nameBox.appendChild(E('span', 'color:#8ab4f8;font-size:12px;', 'Source / Skill: ' + skillLabel(d)));
+      if (d.sourceDetail) nameBox.appendChild(E('span', 'color:#888;font-size:11px;', d.sourceDetail));
       row.appendChild(nameBox);
 
       if (d.id && d.id.indexOf('AlexaBridge_') === 0) row.appendChild(E('span', 'color:#f9f1a5;font-size:12px;', t('echoTag')));
@@ -575,13 +672,19 @@
       var phoenixMeta = await loadPhoenixMeta();
       devices = items.map(function (it) {
         var id = it.legacyAppliance && it.legacyAppliance.applianceId;
-        var meta = (id && phoenixMeta[id]) || {};
-        var decodedSkillId = decodeSkillIdFromApplianceId(id);
-        var skillId = meta.skillId || decodedSkillId || '';
-        var skill = meta.skillName || '';
-        var skillKey = skillId || skill || (id && id.indexOf('AlexaBridge_') === 0 ? '__ALEXA__' : '__UNKNOWN__');
-        if (!skill && skillKey === '__ALEXA__') skill = 'Alexa / Echo';
-        return { name: it.friendlyName, id: id, skillId: skillId, skill: skill, skillKey: skillKey };
+        var meta = metaForId(id, phoenixMeta);
+        var source = sourceForDevice(id, meta);
+        return {
+          name: it.friendlyName,
+          id: id,
+          skillId: source.skillId || meta.skillId || '',
+          skill: meta.skillName || '',
+          skillKey: source.key,
+          sourceLabel: source.label,
+          sourceDetail: source.detail,
+          manufacturerName: meta.manufacturerName || '',
+          connectedVia: meta.connectedVia || ''
+        };
       });
       refreshSkillOptions();
       renderList();
