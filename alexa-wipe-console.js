@@ -7,6 +7,7 @@
   var RELOAD_DELAY = 2000;
   var EU_FALLBACK_TLD = 'fr';
   var DEFAULT_TLD = 'com';
+  var VERSION = 'v5 Tuya / Matter Hub';
 
   /* [tld, libellé FR, libellé EN, codes pays] */
   var DOMAINS = [
@@ -67,9 +68,9 @@
       sortBy: 'Trier :',
       sortNameAZ: 'Nom A → Z',
       sortNameZA: 'Nom Z → A',
-      sortSkillAZ: 'Skill A → Z',
+      sortSkillAZ: 'Source / Skill A → Z',
       filterSkill: 'Source / Skill :',
-      allSkills: 'Toutes les sources / skills',
+      allSkills: 'Toutes les sources',
       unknownSkill: 'Source inconnue',
       shown: '{n} affiché(s) sur {total}'
     },
@@ -113,9 +114,9 @@
       sortBy: 'Sort:',
       sortNameAZ: 'Name A → Z',
       sortNameZA: 'Name Z → A',
-      sortSkillAZ: 'Skill A → Z',
+      sortSkillAZ: 'Source / Skill A → Z',
       filterSkill: 'Source / Skill:',
-      allSkills: 'All sources / skills',
+      allSkills: 'All sources',
       unknownSkill: 'Unknown source',
       shown: '{n} shown of {total}'
     }
@@ -371,16 +372,21 @@
       var skillId = firstUsefulString(v, ['skillId', 'skillID', 'skillIdentifier']);
       if (!skillId && namespace === 'SKILL' && identifier.indexOf('amzn1.ask.skill.') === 0) skillId = identifier;
 
+      var caps = Array.isArray(v.capabilities) ? v.capabilities : [];
+      var interfaces = caps.map(function (c) { return c && c.interfaceName ? c.interfaceName : ''; }).filter(Boolean);
       var info = {
         skillId: skillId,
         skillName: firstUsefulString(v, ['skillName', 'skillDisplayName', 'providerName', 'providerDisplayName']),
         manufacturerName: firstUsefulString(v, ['manufacturerName', 'manufacturer']),
+        friendlyName: firstUsefulString(v, ['friendlyName']),
         friendlyDescription: firstUsefulString(v, ['friendlyDescription', 'description']),
         modelName: firstUsefulString(v, ['modelName']),
         connectedVia: firstUsefulString(v, ['connectedVia', 'connectionName']),
         namespace: namespace,
         identifier: identifier,
-        applianceTypes: Array.isArray(v.applianceTypes) ? v.applianceTypes.slice() : []
+        applianceTypes: Array.isArray(v.applianceTypes) ? v.applianceTypes.slice() : [],
+        capabilityInterfaces: interfaces,
+        mergedApplianceIds: Array.isArray(v.mergedApplianceIds) ? v.mergedApplianceIds.slice() : []
       };
       if (id) merge(id, info);
 
@@ -434,7 +440,40 @@
     return s;
   }
 
-  function sourceForDevice(id, meta) {
+  var KNOWN_SKILL_NAMES = {
+    'amzn1.ask.skill.d879feaf-c8f1-4c3a-a15c-aaad7b5a776d': 'Tuya',
+    'amzn1.ask.skill.7afc671c-e903-428d-9ffc-1fe4cb2dc436': 'Smart Life'
+  };
+
+  function knownSkillName(skillId) {
+    return skillId && KNOWN_SKILL_NAMES[skillId] ? KNOWN_SKILL_NAMES[skillId] : '';
+  }
+
+  function hasType(meta, type) {
+    return !!(meta && Array.isArray(meta.applianceTypes) && meta.applianceTypes.indexOf(type) >= 0);
+  }
+
+  function hasInterface(meta, name) {
+    return !!(meta && Array.isArray(meta.capabilityInterfaces) && meta.capabilityInterfaces.indexOf(name) >= 0);
+  }
+
+  function isMatterHubMeta(meta) {
+    if (!meta) return false;
+    if (!hasType(meta, 'HUB')) return false;
+    if (meta.namespace !== 'AAA' || meta.identifier !== 'SonarCloudService') return false;
+    return hasInterface(meta, 'Alexa.Matter.NodeOperationalCredentials.FabricManagement') ||
+           hasInterface(meta, 'Alexa.Commissionable');
+  }
+
+  function looksLikeAlexaDevice(name, meta) {
+    var n = String(name || (meta && meta.friendlyName) || '').toLowerCase();
+    if (/\b(echo|alexa|fire\s*stick|firetv|fire tv)\b/.test(n)) return true;
+    if (hasType(meta, 'ALEXA_VOICE_ENABLED')) return true;
+    return usefulManufacturer(meta && meta.manufacturerName).toLowerCase() === 'amazon' &&
+           ((meta && meta.connectedVia && String(meta.connectedVia).toLowerCase() === n) || hasType(meta, 'OTHER'));
+  }
+
+  function sourceForDevice(id, meta, friendlyName) {
     meta = meta || {};
 
     if (id && id.indexOf('AlexaBridge_') === 0) {
@@ -448,7 +487,7 @@
     if (!skillId && ns === 'SKILL' && ident.indexOf('amzn1.ask.skill.') === 0) skillId = ident;
 
     if (skillId || ns === 'SKILL' || (id && id.indexOf('SKILL_') === 0)) {
-      var skillName = meta.skillName || usefulManufacturer(meta.manufacturerName) || '';
+      var skillName = meta.skillName || knownSkillName(skillId) || usefulManufacturer(meta.manufacturerName) || '';
       var label = skillName || skillId || (ident ? 'Skill ' + ident : 'Skill Alexa');
       var detail = skillId || ident || 'SKILL';
       if (decoded.stage) detail += ' · ' + decoded.stage;
@@ -460,13 +499,29 @@
       var manufacturer = usefulManufacturer(meta.manufacturerName);
       var via = meta.connectedVia || '';
       var shortId = shortSonarId(id);
-      var label2 = manufacturer || 'SonarCloudService';
-      if (via && via !== 'Wi-Fi' && via !== label2) label2 += ' · via ' + via;
-      if (shortId) label2 += ' · ' + shortId;
-      var detail2 = 'AAA / SonarCloudService';
-      if (meta.friendlyDescription) detail2 += ' · ' + meta.friendlyDescription;
-      else if (via) detail2 += ' · via ' + via;
-      return { key: 'SONAR:' + (sonar || (manufacturer + '|' + via)), label: label2, detail: detail2 };
+
+      if (isMatterHubMeta(meta)) {
+        var hubDetail = ['Matter bridge'];
+        if (manufacturer) hubDetail.push(manufacturer);
+        if (via) hubDetail.push('via ' + via);
+        return { key: '__MATTER_HUB__', label: 'Matter Hub', detail: hubDetail.join(' · ') };
+      }
+
+      if (looksLikeAlexaDevice(friendlyName, meta)) {
+        var alexaDetail = manufacturer || 'Amazon';
+        if (via && String(via).toLowerCase() !== String(friendlyName || '').toLowerCase()) alexaDetail += ' · via ' + via;
+        return { key: '__ALEXA__', label: 'Alexa / Echo', detail: alexaDetail + (shortId ? ' · ' + shortId : '') };
+      }
+
+      /* Dans cette installation, les endpoints Smart Home locaux Sonar non-Amazon
+         proviennent du pont Matter. Même si /api/phoenix ne fournit pas le fabricant,
+         on les regroupe sous Matter Hub plutôt que "Source inconnue". */
+      var matterDetail = [];
+      if (manufacturer) matterDetail.push(manufacturer);
+      if (via) matterDetail.push('via ' + via);
+      if (meta.friendlyDescription) matterDetail.push(meta.friendlyDescription);
+      if (shortId) matterDetail.push(shortId);
+      return { key: '__MATTER_HUB__', label: 'Matter Hub', detail: matterDetail.join(' · ') || 'AAA / SonarCloudService' };
     }
 
     var manufacturer2 = usefulManufacturer(meta.manufacturerName);
@@ -578,7 +633,7 @@
     refreshBtn.textContent = t('refresh');
     wipeBtn.textContent = busy ? t('wiping') : t('wipe');
     mNo.textContent = t('cancel');
-    ptitle.textContent = t('devices');
+    ptitle.textContent = t('devices') + ' — ' + VERSION;
     selAllLbl.lastChild.textContent = t('selectAll');
     sortLbl.textContent = t('sortBy');
     skillLbl.textContent = t('filterSkill');
@@ -607,7 +662,7 @@
     term.scrollTop = term.scrollHeight;
   }
   function cmdline(x) { print(PROMPT + x, 'p'); }
-  function banner() { print('Alexa Smart Home – ' + host, 'dim'); }
+  function banner() { print('Alexa Smart Home – ' + host + ' — ' + VERSION, 'dim'); }
   function fmtResponse(r) {
     /* Même format que la console Chrome pour console.log(response) */
     return "Response {type: '" + r.type + "', url: '" + r.url + "', redirected: " + r.redirected + ', status: ' + r.status + ', ok: ' + r.ok + ', …}';
@@ -670,10 +725,12 @@
       if (j === undefined) throw new Error(t('nonJson', { host: host }) + '\nHTTP ' + g.r.status + ' ' + ctype(g.r) + '\n' + excerpt(g.txt));
       var items = (j.data && j.data.endpoints && j.data.endpoints.items) || [];
       var phoenixMeta = await loadPhoenixMeta();
+      var phoenixCount = Object.keys(phoenixMeta).length;
+      print('Source metadata /api/phoenix : ' + phoenixCount + ' entrée(s)', phoenixCount ? 'dim' : 'warn');
       devices = items.map(function (it) {
         var id = it.legacyAppliance && it.legacyAppliance.applianceId;
         var meta = metaForId(id, phoenixMeta);
-        var source = sourceForDevice(id, meta);
+        var source = sourceForDevice(id, meta, it.friendlyName);
         return {
           name: it.friendlyName,
           id: id,
@@ -688,6 +745,9 @@
       });
       refreshSkillOptions();
       renderList();
+      var sourceCounts = {};
+      devices.forEach(function (d) { sourceCounts[d.sourceLabel] = (sourceCounts[d.sourceLabel] || 0) + 1; });
+      print('Sources détectées : ' + Object.keys(sourceCounts).map(function (k) { return k + '=' + sourceCounts[k]; }).join(' · '), 'dim');
       print(JSON.stringify(j, null, 2));
       if (items.length) print(t('count', { n: items.length }), 'ok');
       else print(afterWipe ? t('allDeleted') : t('none'), afterWipe ? 'ok' : 'warn');
